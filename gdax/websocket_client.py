@@ -19,12 +19,12 @@ from gdax.gdax_auth import get_auth_headers
 
 class WebsocketClient(object):
     def __init__(self, url="wss://ws-feed.gdax.com", products=None, message_type="subscribe", mongo_collection=None,
-                 should_print=True, auth=False, api_key="", api_secret="", api_passphrase="", channels=None):
+                 should_print=False, auth=False, api_key="", api_secret="", api_passphrase="", channels=None):
         self.url = url
         self.products = products
         self.channels = channels
         self.type = message_type
-        self.stop = False
+        self._keep_listening = False
         self.error = None
         self.ws = None
         self.thread = None
@@ -35,18 +35,31 @@ class WebsocketClient(object):
         self.should_print = should_print
         self.mongo_collection = mongo_collection
 
+    @property
+    def closed(self):
+        return not self._keep_listening
+
+    def signal_worker_to_close(self):
+        """
+        We always signal the worker thread to stop listening, and then
+        wait for the rest of closing procedure to be handled by the
+        worker itself.
+        """
+        self._keep_listening = False
+
     def start(self):
         def _go():
             self._connect()
             self._listen()
             self._disconnect()
 
-        self.stop = False
+        self._keep_listening = True
         self.on_open()
         self.thread = Thread(target=_go)
         self.thread.start()
 
     def _connect(self):
+        # FIXME: this part looks like it should go into __init__.
         if self.products is None:
             self.products = ["BTC-USD"]
         elif not isinstance(self.products, list):
@@ -75,19 +88,16 @@ class WebsocketClient(object):
         self.ws.send(json.dumps(sub_params))
 
     def _listen(self):
-        while not self.stop:
+        while self._keep_listening:
             try:
                 if int(time.time() % 30) == 0:
                     # Set a 30 second ping to keep connection alive
                     self.ws.ping("keepalive")
                 data = self.ws.recv()
                 msg = json.loads(data)
-            except ValueError as e:
-                self.on_error(e)
+                self.on_message(msg)
             except Exception as e:
                 self.on_error(e)
-            else:
-                self.on_message(msg)
 
     def _disconnect(self):
         if self.type == "heartbeat":
@@ -101,7 +111,14 @@ class WebsocketClient(object):
         self.on_close()
 
     def close(self):
-        self.stop = True
+        """
+        This can only be called from the parent thread.  (e.g. It cannot
+        be called from on_message, on_close; use `signal_worker_to_close`
+        in those cases.)
+
+        FIXME: this is far from ideal.  Fix.
+        """
+        self._keep_listening = False
         self.thread.join()
 
     def on_open(self):
@@ -120,8 +137,8 @@ class WebsocketClient(object):
 
     def on_error(self, e, data=None):
         self.error = e
-        self.stop
-        print('{} - data: {}'.format(e, data))
+        self.signal_worker_to_close()
+        print('{!r} - data: {}'.format(e, data))
 
 
 if __name__ == "__main__":
