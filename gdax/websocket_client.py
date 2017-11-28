@@ -32,7 +32,7 @@ class WebsocketClient(object):
         self.api_key = api_key
         self.api_secret = api_secret
         self.api_passphrase = api_passphrase
-        self.should_print = should_print
+        self.should_print = should_print  # TODO: change this to `logging`
         self.mongo_collection = mongo_collection
 
     @property
@@ -118,7 +118,7 @@ class WebsocketClient(object):
 
         FIXME: this is far from ideal.  Fix.
         """
-        self._keep_listening = False
+        self.signal_worker_to_close()
         self.thread.join()
 
     def on_open(self):
@@ -140,6 +140,17 @@ class WebsocketClient(object):
         self.signal_worker_to_close()
         print('{!r} - data: {}'.format(e, data))
 
+    def start_and_wait(self):
+        """
+        Start the client and wait until it exits.
+        """
+        self.start()
+        try:
+            while not self.closed():
+                time.sleep(1)
+        except KeyboardInterrupt:
+            order_book.close()
+
 
 if __name__ == "__main__":
     import sys
@@ -155,7 +166,8 @@ if __name__ == "__main__":
             print("Let's count the messages!")
 
         def on_message(self, msg):
-            print(json.dumps(msg, indent=4, sort_keys=True))
+            if self.should_print:
+                print(json.dumps(msg, indent=4, sort_keys=True))
             self.message_count += 1
 
         def on_close(self):
