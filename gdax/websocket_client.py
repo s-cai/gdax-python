@@ -149,7 +149,7 @@ class WebsocketClient(object):
             while not self.closed:
                 time.sleep(1)
         except KeyboardInterrupt:
-            order_book.close()
+            self.close()
 
 
 if __name__ == "__main__":
