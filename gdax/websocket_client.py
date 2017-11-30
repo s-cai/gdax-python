@@ -15,16 +15,19 @@ from threading import Thread
 from websocket import create_connection, WebSocketConnectionClosedException
 from pymongo import MongoClient
 from gdax.gdax_auth import get_auth_headers
+from datetime import datetime
 
 
 class WebsocketClient(object):
-    def __init__(self, url="wss://ws-feed.gdax.com", products=None, message_type="subscribe", mongo_collection=None,
-                 should_print=False, auth=False, api_key="", api_secret="", api_passphrase="", channels=None):
-        self.url = url
-        self.products = products
+    def __init__(self, url="wss://ws-feed.gdax.com", products=["BTC-USD"], message_type="subscribe", mongo_collection=None,
+                 should_print=True, auth=False, api_key="", api_secret="", api_passphrase="", channels=None,
+                 persistent_connection=True):
+        self.url = url.rstrip("/")
+        self.products = products if isinstance(products, list) else [products]  # FIXME: iterables
         self.channels = channels
         self.type = message_type
-        self._keep_listening = False
+        self._client_should_continue = False   # for the entire client, which may have multiple connection sessions
+        self._session_should_continue = False  # for the current connection session
         self.error = None
         self.ws = None
         self.thread = None
@@ -34,40 +37,52 @@ class WebsocketClient(object):
         self.api_passphrase = api_passphrase
         self.should_print = should_print  # TODO: change this to `logging`
         self.mongo_collection = mongo_collection
+        self.persistent_connection = persistent_connection
 
-    @property
-    def closed(self):
-        return not self._keep_listening
+    def is_closed(self):
+        """
+        Whether the entire WebsocketClient is closed.
 
-    def signal_worker_to_close(self):
+        Note that it is possible for the connection to be down while the client is still
+        considered "open" because it is doing retries for persistent connection.
+        """
+        return not self._client_should_continue
+
+    def end_session_signal(self):
         """
         We always signal the worker thread to stop listening, and then
         wait for the rest of closing procedure to be handled by the
         worker itself.
         """
-        self._keep_listening = False
+        self._session_should_continue = False
+
+    def end_client_signal(self):
+        self._client_should_continue = False
 
     def start(self):
-        def _go():
-            self._connect()
-            self._listen()
-            self._disconnect()
+        # TODO: make context manager
+        def _one_session():
+            try:
+                self._session_should_continue = True
+                self._connect()
+                self._listen()
+            finally:
+                self._disconnect()
 
-        self._keep_listening = True
-        self.on_open()
+        def _go():
+            try:
+                self.on_open()
+                _one_session()
+                while self.persistent_connection and self._client_should_continue:
+                    _one_session()
+            finally:
+                self.on_close()
+
+        self._client_should_continue = True
         self.thread = Thread(target=_go)
         self.thread.start()
 
     def _connect(self):
-        # FIXME: this part looks like it should go into __init__.
-        if self.products is None:
-            self.products = ["BTC-USD"]
-        elif not isinstance(self.products, list):
-            self.products = [self.products]
-
-        if self.url[-1] == "/":
-            self.url = self.url[:-1]
-
         if self.channels is None:
             sub_params = {'type': 'subscribe', 'product_ids': self.products}
         else:
@@ -87,15 +102,22 @@ class WebsocketClient(object):
             sub_params = {"type": "heartbeat", "on": False}
         self.ws.send(json.dumps(sub_params))
 
+        self.on_connection()
+
     def _listen(self):
-        while self._keep_listening:
+        while self._client_should_continue and self._session_should_continue:
             try:
                 if int(time.time() % 30) == 0:
                     # Set a 30 second ping to keep connection alive
                     self.ws.ping("keepalive")
                 data = self.ws.recv()
-                msg = json.loads(data)
-                self.on_message(msg)
+
+                try:
+                    msg = json.loads(data)
+                except ValueError as e:
+                    self.on_error(e, data)
+                else:
+                    self.on_message(msg)
             except Exception as e:
                 self.on_error(e)
 
@@ -108,36 +130,53 @@ class WebsocketClient(object):
         except WebSocketConnectionClosedException as e:
             pass
 
-        self.on_close()
+        self.on_disconnection()
 
     def close(self):
         """
         This can only be called from the parent thread.  (e.g. It cannot
-        be called from on_message, on_close; use `signal_worker_to_close`
-        in those cases.)
+        be called from `on_message`, `on_close`.)
 
-        FIXME: this is far from ideal.  Fix.
+        See `end_session_signal`, `end_client_signal` for in-thread calls.
         """
-        self.signal_worker_to_close()
+        self.end_client_signal()
+        self.end_session_signal()
         self.thread.join()
 
-    def on_open(self):
+    def on_connection(self):
+        """
+        Called on each successful socket connection.
+        """
         if self.should_print:
-            print("-- Subscribed! --\n")
+            print("\n-- Socket connected --")
+
+    def on_disconnection(self):
+        self._session_should_continue = False  # Just making sure; most likely it is already set
+        if self.should_print:
+            print("\n-- Socket disconnected at {} --".format(datetime.now()))
+
+    def on_open(self):
+        """
+        Note that this is on the opening of the entire client.  The connection
+        is not established yet at this point.
+
+        See also `on_connection`.
+        """
+        pass
 
     def on_close(self):
-        if self.should_print:
-            print("\n-- Socket Closed --")
+        """
+        On the closing of the entire client.
+        """
+        self._client_should_continue = False  # Just making sure; most likely it is already set
 
     def on_message(self, msg):
-        if self.should_print:
-            print(msg)
         if self.mongo_collection:  # dump JSON to given mongo collection
             self.mongo_collection.insert_one(msg)
 
     def on_error(self, e, data=None):
         self.error = e
-        self.signal_worker_to_close()
+        self.end_session_signal()
         print('{!r} - data: {}'.format(e, data))
 
     def start_and_wait(self):
@@ -146,9 +185,11 @@ class WebsocketClient(object):
         """
         self.start()
         try:
-            while not self.closed:
+            while not self.is_closed():
                 time.sleep(1)
         except KeyboardInterrupt:
+            if self.should_print:
+                print("quiting...")
             self.close()
 
 
