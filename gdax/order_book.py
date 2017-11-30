@@ -30,13 +30,11 @@ class OrderBook(WebsocketClient):
         return self.products[0]
 
     def on_open(self):
+        super(OrderBook, self).on_open()
         self._sequence = -1
-        if self.should_print:
-            print("-- Subscribed to OrderBook! --\n")
 
     def on_close(self):
-        if self.should_print:
-            print("\n-- OrderBook Socket Closed! --")
+        super(OrderBook, self).on_close()
 
     def reset_book(self):
         self._asks = RBTree()
