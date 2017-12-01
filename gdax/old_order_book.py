@@ -4,6 +4,14 @@
 #
 # Live order book updated from the gdax Websocket Feed
 
+"""
+Comment by s-cai after fork:
+
+This is renamed and deprecated.  It is terrible in several ways:
+ - order book logic coupled with live message parsing
+ - order book is written very inefficiently
+"""
+
 from bintrees import RBTree
 from decimal import Decimal
 import pickle
