@@ -66,6 +66,8 @@ class WebsocketClient(object):
                 self._session_should_continue = True
                 self._connect()
                 self._listen()
+            except Exception as e:  # This one almost surely comes from _connect
+                self.on_error(e)
             finally:
                 self._disconnect()
 
@@ -115,6 +117,8 @@ class WebsocketClient(object):
                 try:
                     msg = json.loads(data)
                 except ValueError as e:
+                    if data.strip() == "":
+                        continue
                     self.on_error(e, data)
                 else:
                     self.on_message(msg)
@@ -175,9 +179,14 @@ class WebsocketClient(object):
             self.mongo_collection.insert_one(msg)
 
     def on_error(self, e, data=None):
+        """
+        `on_message` should handle its own exceptions.  When this one
+        is called, it is considered that a problem of the API itself
+        arises, and thus this session will be closed.
+        """
         self.error = e
         self.end_session_signal()
-        print('{!r} - data: {}'.format(e, data))
+        print('{!r} - data: [{}]'.format(e, data))
 
     def start_and_wait(self):
         """

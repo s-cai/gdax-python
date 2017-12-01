@@ -13,8 +13,8 @@ from gdax.websocket_client import WebsocketClient
 
 
 class OrderBook(WebsocketClient):
-    def __init__(self, product_id='BTC-USD', log_to=None):
-        super(OrderBook, self).__init__(products=product_id)
+    def __init__(self, product_id='BTC-USD', log_to=None, **kwargs):
+        super(OrderBook, self).__init__(products=product_id, **kwargs)
         self._asks = RBTree()
         self._bids = RBTree()
         self._client = PublicClient()
@@ -32,9 +32,6 @@ class OrderBook(WebsocketClient):
     def on_open(self):
         super(OrderBook, self).on_open()
         self._sequence = -1
-
-    def on_close(self):
-        super(OrderBook, self).on_close()
 
     def reset_book(self):
         self._asks = RBTree()
@@ -88,7 +85,6 @@ class OrderBook(WebsocketClient):
         self.reset_book()
         print('Error: messages missing ({} - {}). Re-initializing  book at sequence.'.format(
             gap_start, gap_end, self._sequence))
-
 
     def add(self, order):
         order = {
